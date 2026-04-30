@@ -175,21 +175,40 @@ defmodule EctoEnumMigration do
   add_value_to_type(:status, :finished, if_not_exists: true)
   ```
 
+  When combined with `if_not_exists: true`, you can pass `down: :noop` to make the
+  migration reversible with a `down` step that does nothing. This is useful in `change/0`
+  callbacks, where Ecto would otherwise raise on rollback. `down: :noop` requires
+  `if_not_exists: true`, since re-applying the migration would fail if the value already
+  exists.
+
+  ```elixir
+  add_value_to_type(:status, :finished, if_not_exists: true, down: :noop)
+  ```
+
   """
   @spec add_value_to_type(name :: atom(), value :: atom(), opts :: Keyword.t()) ::
           :ok | no_return()
 
   def add_value_to_type(name, value, opts \\ []) do
-    [
-      "ALTER TYPE",
-      type_name(name, opts),
-      "ADD VALUE",
-      if_not_exists_sql(opts),
-      to_value(value),
-      before_after(opts),
-      ";"
-    ]
-    |> execute_query()
+    validate_down_noop!(opts)
+
+    up_sql =
+      [
+        "ALTER TYPE",
+        type_name(name, opts),
+        "ADD VALUE",
+        if_not_exists_sql(opts),
+        to_value(value),
+        before_after(opts),
+        ";"
+      ]
+      |> build_query()
+
+    if Keyword.get(opts, :down) == :noop do
+      execute(up_sql, fn -> :ok end)
+    else
+      execute(up_sql)
+    end
   end
 
   @doc """
@@ -289,11 +308,20 @@ defmodule EctoEnumMigration do
     end
   end
 
-  defp execute_query(terms) do
+  defp execute_query(terms), do: terms |> build_query() |> execute()
+
+  defp build_query(terms) do
     terms
     |> Enum.reject(&(is_nil(&1) || &1 == []))
     |> Enum.intersperse(?\s)
     |> IO.iodata_to_binary()
-    |> execute()
+  end
+
+  defp validate_down_noop!(opts) do
+    if Keyword.get(opts, :down) == :noop and not Keyword.get(opts, :if_not_exists, false) do
+      raise ArgumentError,
+            "add_value_to_type/3 requires `if_not_exists: true` when `down: :noop` is given, " <>
+              "otherwise the migration could not be re-applied after a rollback."
+    end
   end
 end

@@ -114,6 +114,26 @@ defmodule EctoEnumMigrationTest do
     end
   end
 
+  defmodule AddValueToTypeIfNotExistsNoopDownMigration do
+    use Ecto.Migration
+    import EctoEnumMigration
+    @disable_ddl_transaction true
+
+    def change do
+      add_value_to_type(:status, :finished, if_not_exists: true, down: :noop)
+    end
+  end
+
+  defmodule AddValueToTypeNoopDownWithoutIfNotExistsMigration do
+    use Ecto.Migration
+    import EctoEnumMigration
+    @disable_ddl_transaction true
+
+    def change do
+      add_value_to_type(:status, :finished, down: :noop)
+    end
+  end
+
   defmodule AddValueToTypeWithCustomSchemaMigration do
     use Ecto.Migration
     import EctoEnumMigration
@@ -321,6 +341,41 @@ defmodule EctoEnumMigrationTest do
 
       assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
         :ok = down(add_value_version, AddValueToTypeIfNotExistsMigration)
+      end
+    end
+
+    test "supports if not exists with down: :noop (reversible no-op down)" do
+      create_version = version_number()
+      add_value_version = version_number()
+
+      :ok = up(create_version, CreateTypeMigration)
+      :ok = up(add_value_version, AddValueToTypeIfNotExistsNoopDownMigration)
+
+      assert current_types() == %{
+               "public.status" => ["registered", "active", "inactive", "archived", "finished"]
+             }
+
+      :ok = down(add_value_version, AddValueToTypeIfNotExistsNoopDownMigration)
+
+      assert current_types() == %{
+               "public.status" => ["registered", "active", "inactive", "archived", "finished"]
+             }
+
+      :ok = up(add_value_version, AddValueToTypeIfNotExistsNoopDownMigration)
+
+      assert current_types() == %{
+               "public.status" => ["registered", "active", "inactive", "archived", "finished"]
+             }
+    end
+
+    test "raises when down: :noop is given without if_not_exists: true" do
+      create_version = version_number()
+      add_value_version = version_number()
+
+      :ok = up(create_version, CreateTypeMigration)
+
+      assert_raise ArgumentError, ~r/requires `if_not_exists: true`/, fn ->
+        up(add_value_version, AddValueToTypeNoopDownWithoutIfNotExistsMigration)
       end
     end
 

@@ -123,12 +123,22 @@ defmodule EctoEnumMigration do
   @doc """
   Add a value to a existing Postgres type.
 
-  This operation is not reversible, existing values cannot be removed from an enum type.
-  Checkout [Enumerated Types](https://www.postgresql.org/docs/current/datatype-enum.html)
-  for more information.
+  Postgres has no native way to remove a value from an enum, so the down
+  migration runs the following steps inside a single `DO` block:
 
-  Also if running on a version of Postgres <= 11 then it cannot be used inside
-  a transaction block, so we need to set `@disable_ddl_transaction true` in the migration.
+    1. Rename the existing type to a temporary name.
+    2. Create a new type with all existing values except the one being dropped.
+    3. Alter every column currently using the type to use the new type.
+    4. Drop the renamed (original) type.
+
+  The down migration will fail if any row holds the value being dropped —
+  update or delete those rows before rolling back.
+
+  If running on a version of Postgres <= 11, `add_value_to_type` cannot be
+  used inside a transaction block, so you'll need to set
+  `@disable_ddl_transaction true` in the migration. The down migration runs
+  as a single `DO` block, which is self-contained, so this restriction does
+  not affect the down migration.
 
   ## Examples
 
@@ -139,11 +149,8 @@ defmodule EctoEnumMigration do
     # Only needed if running on Postgres <= 11
     @disable_ddl_transaction true
 
-    def up do
+    def change do
       add_value_to_type(:status, :finished)
-    end
-
-    def down do
     end
   end
   ```
@@ -175,21 +182,28 @@ defmodule EctoEnumMigration do
   add_value_to_type(:status, :finished, if_not_exists: true)
   ```
 
+  Note that `:if_not_exists` only affects the up migration. The down
+  migration always drops the value if it is present in the type.
   """
   @spec add_value_to_type(name :: atom(), value :: atom(), opts :: Keyword.t()) ::
           :ok | no_return()
 
   def add_value_to_type(name, value, opts \\ []) do
-    [
-      "ALTER TYPE",
-      type_name(name, opts),
-      "ADD VALUE",
-      if_not_exists_sql(opts),
-      to_value(value),
-      before_after(opts),
-      ";"
-    ]
-    |> execute_query()
+    up_sql =
+      [
+        "ALTER TYPE",
+        type_name(name, opts),
+        "ADD VALUE",
+        if_not_exists_sql(opts),
+        to_value(value),
+        before_after(opts),
+        ";"
+      ]
+      |> build_query()
+
+    down_sql = remove_value_from_type_sql(name, value, opts)
+
+    execute(up_sql, down_sql)
   end
 
   @doc """
@@ -289,11 +303,79 @@ defmodule EctoEnumMigration do
     end
   end
 
-  defp execute_query(terms) do
+  defp build_query(terms) do
     terms
     |> Enum.reject(&(is_nil(&1) || &1 == []))
     |> Enum.intersperse(?\s)
     |> IO.iodata_to_binary()
-    |> execute()
+  end
+
+  defp execute_query(terms) do
+    terms |> build_query() |> execute()
+  end
+
+  defp schema_name(opts) do
+    opts_schema = Keyword.get(opts, :schema, "public")
+
+    repo_prefix =
+      %{prefix: nil}
+      |> Ecto.Migration.__prefix__()
+      |> Map.fetch!(:prefix)
+
+    repo_prefix || opts_schema
+  end
+
+  defp remove_value_from_type_sql(name, value, opts) do
+    full_type = type_name(name, opts)
+    schema = schema_name(opts)
+    rename_to = "#{name}__ecto_enum_migration_drop"
+    qualified_renamed = "#{schema}.#{rename_to}"
+    value_str = to_string(value)
+
+    """
+    DO $ecto_enum_migration$
+    DECLARE
+      old_oid oid;
+      new_values text;
+      rec record;
+    BEGIN
+      old_oid := '#{full_type}'::regtype::oid;
+
+      EXECUTE 'ALTER TYPE #{full_type} RENAME TO #{rename_to}';
+
+      SELECT string_agg(quote_literal(enumlabel), ', ' ORDER BY enumsortorder)
+        INTO new_values
+        FROM pg_enum
+       WHERE enumtypid = old_oid
+         AND enumlabel <> '#{value_str}';
+
+      IF new_values IS NULL THEN
+        RAISE EXCEPTION 'Cannot drop last value from enum type #{full_type}';
+      END IF;
+
+      EXECUTE format('CREATE TYPE #{full_type} AS ENUM (%s)', new_values);
+
+      FOR rec IN
+        SELECT n.nspname AS schema_name,
+               c.relname AS table_name,
+               a.attname AS column_name
+          FROM pg_attribute a
+          JOIN pg_class c ON c.oid = a.attrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE a.atttypid = old_oid
+           AND a.attnum > 0
+           AND NOT a.attisdropped
+           AND c.relkind = 'r'
+      LOOP
+        EXECUTE format(
+          'ALTER TABLE %I.%I ALTER COLUMN %I TYPE #{full_type} USING %I::text::#{full_type}',
+          rec.schema_name, rec.table_name, rec.column_name, rec.column_name
+        );
+      END LOOP;
+
+      EXECUTE 'DROP TYPE #{qualified_renamed}';
+    END
+    $ecto_enum_migration$;
+    """
   end
 end

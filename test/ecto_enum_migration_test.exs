@@ -164,6 +164,16 @@ defmodule EctoEnumMigrationTest do
     end
   end
 
+  defmodule CreateUsersTableMigration do
+    use Ecto.Migration
+
+    def change do
+      create table(:users) do
+        add(:status, :status)
+      end
+    end
+  end
+
   setup do
     Ecto.Adapters.Postgres.storage_down(TestRepo.config())
     :ok = Ecto.Adapters.Postgres.storage_up(TestRepo.config())
@@ -301,9 +311,11 @@ defmodule EctoEnumMigrationTest do
                "public.status" => ["registered", "active", "inactive", "archived", "finished"]
              }
 
-      assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
-        :ok = down(add_value_version, AddValueToTypeMigration)
-      end
+      :ok = down(add_value_version, AddValueToTypeMigration)
+
+      assert current_types() == %{
+               "public.status" => ["registered", "active", "inactive", "archived"]
+             }
     end
 
     test "supports if not exists option" do
@@ -319,9 +331,11 @@ defmodule EctoEnumMigrationTest do
                "public.status" => ["registered", "active", "inactive", "archived", "finished"]
              }
 
-      assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
-        :ok = down(add_value_version, AddValueToTypeIfNotExistsMigration)
-      end
+      :ok = down(add_value_version, AddValueToTypeIfNotExistsMigration)
+
+      assert current_types() == %{
+               "public.status" => ["registered", "active", "inactive", "archived"]
+             }
     end
 
     test "supports before option" do
@@ -335,9 +349,11 @@ defmodule EctoEnumMigrationTest do
                "public.status" => ["registered", "finished", "active", "inactive", "archived"]
              }
 
-      assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
-        :ok = down(add_value_version, AddValueToTypeMigration)
-      end
+      :ok = down(add_value_version, AddValueToTypeWithBeforeMigration)
+
+      assert current_types() == %{
+               "public.status" => ["registered", "active", "inactive", "archived"]
+             }
     end
 
     test "supports after option" do
@@ -351,9 +367,11 @@ defmodule EctoEnumMigrationTest do
                "public.status" => ["registered", "active", "finished", "inactive", "archived"]
              }
 
-      assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
-        :ok = down(add_value_version, AddValueToTypeMigration)
-      end
+      :ok = down(add_value_version, AddValueToTypeWithAfterMigration)
+
+      assert current_types() == %{
+               "public.status" => ["registered", "active", "inactive", "archived"]
+             }
     end
 
     test "supports custom schema" do
@@ -375,9 +393,11 @@ defmodule EctoEnumMigrationTest do
                ]
              }
 
-      assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
-        :ok = down(add_value_version, AddValueToTypeMigration)
-      end
+      :ok = down(add_value_version, AddValueToTypeWithCustomSchemaMigration)
+
+      assert current_types() == %{
+               "custom_schema.status" => ["registered", "active", "inactive", "archived"]
+             }
     end
 
     test "supports before option with custom schema" do
@@ -399,9 +419,11 @@ defmodule EctoEnumMigrationTest do
                ]
              }
 
-      assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
-        :ok = down(add_value_version, AddValueToTypeMigration)
-      end
+      :ok = down(add_value_version, AddValueToTypeWithBeforeAndCustomSchemaMigration)
+
+      assert current_types() == %{
+               "custom_schema.status" => ["registered", "active", "inactive", "archived"]
+             }
     end
 
     test "supports after option with custom schema" do
@@ -423,9 +445,39 @@ defmodule EctoEnumMigrationTest do
                ]
              }
 
-      assert_raise Ecto.MigrationError, ~r/cannot reverse migration command/, fn ->
-        :ok = down(add_value_version, AddValueToTypeMigration)
-      end
+      :ok = down(add_value_version, AddValueToTypeWithAfterAndCustomSchemaMigration)
+
+      assert current_types() == %{
+               "custom_schema.status" => ["registered", "active", "inactive", "archived"]
+             }
+    end
+
+    test "down migration re-types existing columns and preserves rows" do
+      type_version = version_number()
+      table_version = version_number()
+      add_value_version = version_number()
+
+      :ok = up(type_version, CreateTypeMigration)
+      :ok = up(table_version, CreateUsersTableMigration)
+      :ok = up(add_value_version, AddValueToTypeMigration)
+
+      TestRepo.query!("INSERT INTO users (status) VALUES ('registered'), ('active')")
+
+      :ok = down(add_value_version, AddValueToTypeMigration)
+
+      assert current_types() == %{
+               "public.status" => ["registered", "active", "inactive", "archived"]
+             }
+
+      %{rows: rows} = TestRepo.query!("SELECT status::text FROM users ORDER BY status")
+      assert rows == [["active"], ["registered"]]
+
+      # The column still uses the recreated `public.status` type (same name,
+      # new oid). Inserting a value that exists in the type works; inserting
+      # the dropped value fails.
+      TestRepo.query!("INSERT INTO users (status) VALUES ('archived')")
+
+      assert {:error, _} = TestRepo.query("INSERT INTO users (status) VALUES ('finished')")
     end
   end
 

@@ -184,13 +184,12 @@ defmodule EctoEnumMigration do
   ```elixir
   add_value_to_type(:status, :finished, if_not_exists: true, down: :noop)
   ```
-
   """
   @spec add_value_to_type(name :: atom(), value :: atom(), opts :: Keyword.t()) ::
           :ok | no_return()
 
   def add_value_to_type(name, value, opts \\ []) do
-    validate_down_noop!(opts)
+    validate_opts!(opts)
 
     up_sql =
       [
@@ -317,8 +316,8 @@ defmodule EctoEnumMigration do
     |> IO.iodata_to_binary()
   end
 
-  defp validate_down_noop!(opts) do
-    if Keyword.get(opts, :down) == :noop and not Keyword.get(opts, :if_not_exists, false) do
+  defp validate_opts!(opts) do
+    if opts[:down] == :noop and !opts[:if_not_exists] do
       raise ArgumentError,
             "add_value_to_type/3 requires `if_not_exists: true` when `down: :noop` is given, " <>
               "otherwise the migration could not be re-applied after a rollback."
